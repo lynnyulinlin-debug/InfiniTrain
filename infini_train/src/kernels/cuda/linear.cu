@@ -71,7 +71,7 @@ std::shared_ptr<Tensor> MatmulForward(const std::shared_ptr<Tensor> &input, cons
         DISPATCH_CASE(WRAP(CUBLAS_CHECK(cublasGemmStridedBatchedEx(
                           handle, CUBLAS_OP_N, CUBLAS_OP_N, n, m, k, &alpha, other->DataPtr(), CUDA_R_16BF, lda,
                           stride_a, input->DataPtr(), CUDA_R_16BF, ldb, stride_b, &beta, output->DataPtr(), CUDA_R_16BF,
-                          ldc, stride_c, bs, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));),
+                          ldc, stride_c, bs, CUBLAS_COMPUTE_32F_FAST_16BF, CUBLAS_GEMM_DFALT_TENSOR_OP));),
                       DataType::kBFLOAT16)
     default:
         LOG_UNSUPPORTED_DTYPE(dtype, "CUDA MatmulForward");
@@ -91,11 +91,25 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
     auto input_dtype = input->Dtype();
     auto other_dtype = other->Dtype();
     auto grad_output_dtype = grad_output->Dtype();
-    DataType promoted_type
-        = DispatchFunc<DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>>(
+    // DataType promoted_type
+    //     = DispatchFunc<DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>>(
+    //         {input_dtype, other_dtype, grad_output_dtype},
+    //         [=]<typename Tin, typename To, typename Tgrad>() { return DataTypeMap_v<WidestType_t<Tin, To, Tgrad>>; },
+    //         "CUDA MatmulBackward");
+    DataType promoted_type;
+
+
+    // 检查是否在Autocast上下文中
+    if (tls_autocast_context.enabled) {
+        // Forward用了BF16，Backward也用BF16（PyTorch AMP标准）
+        promoted_type = tls_autocast_context.autocast_dtype;
+    } else {
+    // 非Autocast场景，提升到最宽类型
+        promoted_type = DispatchFunc<DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>>(
             {input_dtype, other_dtype, grad_output_dtype},
             [=]<typename Tin, typename To, typename Tgrad>() { return DataTypeMap_v<WidestType_t<Tin, To, Tgrad>>; },
             "CUDA MatmulBackward");
+    }
 
     auto input_promoted = input_dtype == promoted_type ? input : std::make_shared<Tensor>(input->To(promoted_type));
     auto other_promoted = other_dtype == promoted_type ? other : std::make_shared<Tensor>(other->To(promoted_type));
@@ -161,7 +175,10 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
                 WRAP(CUBLAS_CHECK(cublasGemmStridedBatchedEx(
                     handle, CUBLAS_OP_T, CUBLAS_OP_N, k, m, n, &alpha, other_promoted->DataPtr(), CUDA_R_16BF, lda,
                     stride_a, grad_output_promoted->DataPtr(), CUDA_R_16BF, ldb, stride_b, &beta, grad_input->DataPtr(),
-                    CUDA_R_16BF, ldc, stride_c, bs, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));),
+                    CUDA_R_16BF, ldc, stride_c, bs, 
+                    CUBLAS_COMPUTE_32F_FAST_16BF,      // ← BF16乘法 + FP32累加
+                    CUBLAS_GEMM_DFALT_TENSOR_OP));     // ← 显式启用Tensor Core
+                ),
                 DataType::kBFLOAT16)
         }
     }
@@ -187,10 +204,19 @@ MatmulBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
                 WRAP(CUBLAS_CHECK(cublasGemmStridedBatchedEx(
                     handle, CUBLAS_OP_N, CUBLAS_OP_T, n, k, m, &alpha, grad_output_promoted->DataPtr(), CUDA_R_16BF,
                     lda, stride_a, input_promoted->DataPtr(), CUDA_R_16BF, ldb, stride_b, &beta, grad_other->DataPtr(),
-                    CUDA_R_16BF, ldc, stride_c, bs, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));),
+                    CUDA_R_16BF, ldc, stride_c, bs, 
+                    CUBLAS_COMPUTE_32F_FAST_16BF,      // ← BF16乘法 + FP32累加
+                    CUBLAS_GEMM_DFALT_TENSOR_OP));     // ← 显式启用Tensor Core
+                ),
                 DataType::kBFLOAT16)
         }
     }
+    // 将 BF16 梯度转换为 FP32（与 PyTorch 对齐）
+    if (promoted_type == DataType::kBFLOAT16) {
+        grad_input = std::make_shared<Tensor>(grad_input->To(DataType::kFLOAT32));
+        grad_other = std::make_shared<Tensor>(grad_other->To(DataType::kFLOAT32));
+    }
+
 
     return {grad_input, grad_other};
 }
@@ -295,7 +321,8 @@ std::shared_ptr<Tensor> LinearForward(const std::shared_ptr<Tensor> &input, cons
                           CUBLAS_CHECK(cublasGemmEx(handle, trans_a, trans_b, out_features, bs, in_features, &alpha,
                                                     weight->DataPtr(), CUDA_R_16BF, lda, input->DataPtr(), CUDA_R_16BF,
                                                     in_features, &beta, output->DataPtr(), CUDA_R_16BF, out_features,
-                                                    CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
+                                                    CUBLAS_COMPUTE_32F_FAST_16BF,      // ← BF16乘法 + FP32累加
+                                                    CUBLAS_GEMM_DFALT_TENSOR_OP));     // ← 显式启用Tensor Core                               
                       }),
                       DataType::kBFLOAT16)
     }
@@ -333,11 +360,21 @@ LinearBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
     auto dtype = grad_output->Dtype();
     auto input_dtype = input->Dtype();
     auto weight_dtype = weight->Dtype();
-    DataType promoted_type
-        = DispatchFunc<DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>>(
+    // DataType promoted_type
+    //     = DispatchFunc<DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>>(
+    //         {input_dtype, weight_dtype, dtype},
+    //         [=]<typename Tin, typename Tw, typename Tgrad>() { return DataTypeMap_v<WidestType_t<Tin, Tw, Tgrad>>; },
+    //         "CUDA LinearBackward");
+    DataType promoted_type;
+
+    if (tls_autocast_context.enabled) {
+        promoted_type = tls_autocast_context.autocast_dtype;
+    } else {
+        promoted_type = DispatchFunc<DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>, DataTypeList<INFINI_ALL_TYPES>>(
             {input_dtype, weight_dtype, dtype},
             [=]<typename Tin, typename Tw, typename Tgrad>() { return DataTypeMap_v<WidestType_t<Tin, Tw, Tgrad>>; },
             "CUDA LinearBackward");
+    }
 
     auto input_promoted = input_dtype == promoted_type ? input : std::make_shared<Tensor>(input->To(promoted_type));
     auto weight_promoted = weight_dtype == promoted_type ? weight : std::make_shared<Tensor>(weight->To(promoted_type));
@@ -440,11 +477,16 @@ LinearBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
                           CUBLAS_CHECK(cublasGemmEx(handle, trans_a1, trans_b1, in_features, bs, out_features, &alpha,
                                                     weight_promoted->DataPtr(), CUDA_R_16BF, lda1,
                                                     grad_output_promoted->DataPtr(), CUDA_R_16BF, out_features, &beta,
-                                                    grad_input->DataPtr(), CUDA_R_16BF, in_features, CUDA_R_32F,
-                                                    CUBLAS_GEMM_DEFAULT));
+                                                    grad_input->DataPtr(), CUDA_R_16BF, in_features, 
+                                                    CUBLAS_COMPUTE_32F_FAST_16BF,           // ← BF16乘法 + FP32累加
+                                                    CUBLAS_GEMM_DFALT_TENSOR_OP));         // ← 显式启用Tensor Core
+                                                
                           CUBLAS_CHECK(cublasGemmEx(handle, trans_a2, trans_b2, m2, n2, bs, &alpha, a2, CUDA_R_16BF,
                                                     lda2, b2, CUDA_R_16BF, ldb2, &beta, grad_weight->DataPtr(),
-                                                    CUDA_R_16BF, ldc2, CUDA_R_32F, CUBLAS_GEMM_DEFAULT));
+                                                    CUDA_R_16BF, ldc2, 
+                                                    CUBLAS_COMPUTE_32F_FAST_16BF,      // ← BF16乘法 + FP32累加
+                                                    CUBLAS_GEMM_DFALT_TENSOR_OP));     // ← 显式启用Tensor Core
+                                                
                           if (bias) {
                               constexpr int BLOCK_SIZE = 256;
                               int threads_per_block = BLOCK_SIZE;
@@ -455,6 +497,14 @@ LinearBackward(const std::shared_ptr<Tensor> &input, const std::shared_ptr<Tenso
                           }
                       }),
                       DataType::kBFLOAT16)
+    }
+    // 将 BF16 梯度转换为 FP32
+    if (promoted_type == DataType::kBFLOAT16) {
+        grad_input = std::make_shared<Tensor>(grad_input->To(DataType::kFLOAT32));
+        grad_weight = std::make_shared<Tensor>(grad_weight->To(DataType::kFLOAT32));
+        if (grad_bias) {
+            grad_bias = std::make_shared<Tensor>(grad_bias->To(DataType::kFLOAT32));
+        }
     }
 
     return {grad_input, grad_weight, grad_bias};
