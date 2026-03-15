@@ -183,4 +183,40 @@ std::shared_ptr<Tensor> Stack(const std::vector<std::shared_ptr<Tensor>> &inputs
 //   Concatenation of the input tensors.
 std::shared_ptr<Tensor> Concat(const std::vector<std::shared_ptr<Tensor>> &inputs, int64_t dim = 0);
 
+// Computes scaled dot-product attention using Flash Attention 2 algorithm.
+//
+// This function implements efficient attention computation with O(N) memory complexity
+// instead of O(N²) for standard attention. It's optimized for CUDA devices and supports
+// causal masking, dropout, and custom scaling.
+//
+// The attention is computed as:
+//   Attention(Q, K, V) = softmax(Q @ K^T / scale) @ V
+//
+// Args:
+//   query: Query tensor of shape (batch, seqlen_q, num_heads, head_dim)
+//   key: Key tensor of shape (batch, seqlen_k, num_heads, head_dim)
+//   value: Value tensor of shape (batch, seqlen_k, num_heads, head_dim)
+//   attn_mask: Optional attention mask (currently not supported, use is_causal instead)
+//   dropout_p: Dropout probability (default 0.0, no dropout)
+//   is_causal: If true, applies causal masking (default false)
+//   scale: Optional scaling factor. If not provided, uses 1/sqrt(head_dim)
+//   enable_gqa: Enable Grouped Query Attention (default false, currently not supported)
+//
+// Returns:
+//   Output tensor of shape (batch, seqlen_q, num_heads, head_dim)
+//
+// Note:
+//   - Only supports CUDA devices
+//   - Requires query, key, value to have the same dtype (float16 or bfloat16)
+//   - For best performance, ensure tensors are contiguous in memory
+std::shared_ptr<Tensor> ScaledDotProductAttention(
+    const std::shared_ptr<Tensor> &query,
+    const std::shared_ptr<Tensor> &key,
+    const std::shared_ptr<Tensor> &value,
+    const std::shared_ptr<Tensor> &attn_mask = nullptr,
+    float dropout_p = 0.0,
+    bool is_causal = false,
+    float scale = -1.0f,
+    bool enable_gqa = false);
+
 } // namespace infini_train::nn::function

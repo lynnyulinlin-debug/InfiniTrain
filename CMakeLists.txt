@@ -35,6 +35,14 @@ endif()
 add_subdirectory(third_party/eigen)
 include_directories(${PROJECT_SOURCE_DIR}/third_party/eigen)
 
+# Flash Attention 2 - Custom Implementation
+option(ENABLE_FLASH_ATTENTION "Enable Flash Attention 2" OFF)
+
+if(ENABLE_FLASH_ATTENTION AND USE_CUDA)
+  message(STATUS "Enabling Flash Attention 2 (custom implementation)")
+  add_compile_definitions(ENABLE_FLASH_ATTENTION=1)
+endif()
+
 include_directories(${PROJECT_SOURCE_DIR})
 
 if(PROFILE_MODE)

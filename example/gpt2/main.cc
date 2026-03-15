@@ -78,6 +78,8 @@ DEFINE_string(dtype, "float32", "precision used in training (float32/bfloat16)")
 DEFINE_string(
     precision_check, "",
     "precision check config: level=N,format=simple|table,output_md5=true|false,output_path=PATH,baseline=PATH");
+// flash attention
+DEFINE_bool(flash, false, "Whether to enable Flash Attention 2 for efficient attention computation");
 
 using namespace infini_train;
 
@@ -184,9 +186,14 @@ void Train(const nn::parallel::Rank &rank) {
         model = GPT2::FromLLMC(FLAGS_llmc_filepath);
     } else if (kModelToConfigs.count(FLAGS_model)) {
         model_config = kModelToConfigs.at(FLAGS_model);
+        model_config.use_flash_attn = FLAGS_flash;  // Set Flash Attention flag
         model = std::make_shared<GPT2>(model_config);
     } else {
         model = GPT2::FromPretrained(kStrToModelType.at(FLAGS_model));
+    }
+
+    if (FLAGS_flash) {
+        LOG(INFO) << "Flash Attention 2 enabled for efficient attention computation";
     }
 
     model->To(device);

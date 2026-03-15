@@ -19,6 +19,7 @@ struct GPT2Config {
     int64_t n_layer = 12;
     int64_t n_head = 12;
     int64_t n_embd = 768;
+    bool use_flash_attn = false;  // Enable Flash Attention
 };
 
 class NewGELU : public infini_train::nn::CloneableModule<NewGELU> {
@@ -38,7 +39,7 @@ public:
 
     static constexpr char kParamBiasName[] = "bias";
 
-    explicit CausalSelfAttention(const GPT2Config &config);
+    explicit CausalSelfAttention(const GPT2Config &config, bool use_flash_attn = false);
 
     std::vector<std::shared_ptr<infini_train::Tensor>>
     Forward(const std::vector<std::shared_ptr<infini_train::Tensor>> &x) override;
@@ -49,6 +50,7 @@ private:
     int64_t n_embd_ = 0;
 
     int64_t local_n_head_ = 0;
+    bool use_flash_attn_ = false;
 };
 
 class MLP : public infini_train::nn::CloneableModule<MLP> {

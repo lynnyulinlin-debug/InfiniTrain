@@ -6,6 +6,7 @@
 
 #include "infini_train/include/autograd/activations.h"
 #include "infini_train/include/autograd/elementwise.h"
+#include "infini_train/include/autograd/flash_attention.h"
 #include "infini_train/include/autograd/misc.h"
 #include "infini_train/include/autograd/reduction.h"
 #include "infini_train/include/autograd/softmax.h"
@@ -79,4 +80,27 @@ std::shared_ptr<Tensor> Softmax(const std::shared_ptr<Tensor> &input, int64_t di
 std::shared_ptr<Tensor> Sigmoid(const std::shared_ptr<Tensor> &input) {
     return std::make_shared<autograd::Sigmoid>()->Apply({input})[0];
 }
+
+std::shared_ptr<Tensor> ScaledDotProductAttention(
+    const std::shared_ptr<Tensor> &query,
+    const std::shared_ptr<Tensor> &key,
+    const std::shared_ptr<Tensor> &value,
+    const std::shared_ptr<Tensor> &attn_mask,
+    float dropout_p,
+    bool is_causal,
+    float scale,
+    bool enable_gqa) {
+
+    // Create Flash Attention function
+    auto flash_attn = std::make_shared<autograd::FlashAttention>();
+
+    // Configure parameters
+    flash_attn->SetCausal(is_causal);
+    flash_attn->SetDropout(dropout_p);
+    flash_attn->SetScale(scale);
+
+    // Apply and return result
+    return flash_attn->Apply({query, key, value})[0];
+}
+
 } // namespace infini_train::nn::function

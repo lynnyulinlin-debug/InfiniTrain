@@ -46,8 +46,9 @@ NewGELU::Forward(const std::vector<std::shared_ptr<infini_train::Tensor>> &x) {
             * (1.0 + nn::function::Tanh(std::sqrt(2.0 / M_PI) * (input + 0.044715 * nn::function::Pow(input, 3.0))))};
 }
 
-CausalSelfAttention::CausalSelfAttention(const GPT2Config &config)
-    : CloneableModule(kType), config_(config), n_head_(config.n_head), n_embd_(config.n_embd) {
+CausalSelfAttention::CausalSelfAttention(const GPT2Config &config, bool use_flash_attn)
+    : CloneableModule(kType), config_(config), n_head_(config.n_head), n_embd_(config.n_embd),
+      use_flash_attn_(use_flash_attn) {
     auto tp_world_size = nn::parallel::global::GetTensorParallelSize();
     CHECK_EQ(config.n_embd % config.n_head, 0);
     CHECK_EQ(n_head_ % tp_world_size, 0) << "n_head must be divisible by TP world size";
@@ -99,24 +100,47 @@ CausalSelfAttention::Forward(const std::vector<std::shared_ptr<infini_train::Ten
     // NOTE(zbl): Acquire full T after AllGather is performed in ColumnParallelLinear
     const auto T = q->Dims()[1];
 
-    // View to multi-head: local_n_head * head_dim == local_C
-    // (B, T, local_C) -> (B, T, h_l, Dh) -> (B, h_l, T, Dh)
-    k = k->View({B, T, local_n_head_, head_dim})->Transpose(1, 2);
-    q = q->View({B, T, local_n_head_, head_dim})->Transpose(1, 2);
-    v = v->View({B, T, local_n_head_, head_dim})->Transpose(1, 2);
+    std::shared_ptr<Tensor> y;
 
-    // (B, h_l, T, T)
-    auto att = q->Matmul(k->Transpose(-2, -1)) * (1.0 / std::sqrt(head_dim));
-    // (1, 1, T, T)
-    auto mask = buffers_[kParamBiasName]->Slice({0, 0, 0, 0}, {1, 1, T, T}, {1, 1, 1, 1});
-    // (1, 1, T, T) -> eq 0 -> (1, 1, T, T) -> masked_fill -> (B, h_l, T, T)
-    att = att->MaskedFill(mask == 0, -std::numeric_limits<float>::infinity());
-    // (B, h_l, T, T)
-    att = nn::function::Softmax(att, -1);
-    // (B, h_l, T, Dh)
-    auto y = att->Matmul(v);
-    // (B, h_l, T, Dh) -> (B, T, h_l, Dh) -> (B, T, local_C)
-    y = y->Transpose(1, 2)->Contiguous()->View({B, T, local_C});
+    if (use_flash_attn_) {
+        // Flash Attention path: expects (B, T, h_l, Dh) layout
+        q = q->View({B, T, local_n_head_, head_dim});
+        k = k->View({B, T, local_n_head_, head_dim});
+        v = v->View({B, T, local_n_head_, head_dim});
+
+        // Call Flash Attention
+        y = nn::function::ScaledDotProductAttention(
+            q, k, v,
+            /*attn_mask=*/nullptr,
+            /*dropout_p=*/0.0f,
+            /*is_causal=*/true,
+            /*scale=*/-1.0f,  // auto-compute
+            /*enable_gqa=*/false);
+
+        // (B, T, h_l, Dh) -> (B, T, local_C)
+        y = y->Contiguous()->View({B, T, local_C});
+
+    } else {
+        // Original small-operator path
+        // View to multi-head: local_n_head * head_dim == local_C
+        // (B, T, local_C) -> (B, T, h_l, Dh) -> (B, h_l, T, Dh)
+        k = k->View({B, T, local_n_head_, head_dim})->Transpose(1, 2);
+        q = q->View({B, T, local_n_head_, head_dim})->Transpose(1, 2);
+        v = v->View({B, T, local_n_head_, head_dim})->Transpose(1, 2);
+
+        // (B, h_l, T, T)
+        auto att = q->Matmul(k->Transpose(-2, -1)) * (1.0 / std::sqrt(head_dim));
+        // (1, 1, T, T)
+        auto mask = buffers_[kParamBiasName]->Slice({0, 0, 0, 0}, {1, 1, T, T}, {1, 1, 1, 1});
+        // (1, 1, T, T) -> eq 0 -> (1, 1, T, T) -> masked_fill -> (B, h_l, T, T)
+        att = att->MaskedFill(mask == 0, -std::numeric_limits<float>::infinity());
+        // (B, h_l, T, T)
+        att = nn::function::Softmax(att, -1);
+        // (B, h_l, T, Dh)
+        y = att->Matmul(v);
+        // (B, h_l, T, Dh) -> (B, T, h_l, Dh) -> (B, T, local_C)
+        y = y->Transpose(1, 2)->Contiguous()->View({B, T, local_C});
+    }
 
     // Get full tensor
     // (B, T, local_C) -> RowParallelLinear(n_embd, n_embd) -> (B, T, C)
@@ -161,7 +185,7 @@ MLP::Forward(const std::vector<std::shared_ptr<infini_train::Tensor>> &x) {
 
 Block::Block(const GPT2Config &config) : CloneableModule(kType) {
     modules_[kLn1LayerName] = std::make_shared<nn::LayerNorm>(std::vector<int64_t>{config.n_embd});
-    modules_[kAttnLayerName] = std::make_shared<CausalSelfAttention>(config);
+    modules_[kAttnLayerName] = std::make_shared<CausalSelfAttention>(config, config.use_flash_attn);
     modules_[kLn2LayerName] = std::make_shared<nn::LayerNorm>(std::vector<int64_t>{config.n_embd});
     modules_[kMlpLayerName] = std::make_shared<MLP>(config);
 }
