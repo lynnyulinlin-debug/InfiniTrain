@@ -32,9 +32,13 @@ A from-scratch C++ training framework for large-scale models with multi-dimensio
 ### Installation
 
 ```bash
+# Initialize submodules (including Flash Attention 2)
+git submodule update --init --recursive
+
+# Build
 mkdir build
 cd build
-cmake .. -DUSE_CUDA=ON -DUSE_NCCL=ON
+cmake .. -DUSE_CUDA=ON -DUSE_NCCL=ON -DENABLE_FLASH_ATTENTION=ON
 make -j
 ```
 
@@ -47,6 +51,10 @@ Build Options:
 - `USE_NCCL=ON`
 
   Enable NCCL-based distributed communication.
+
+- `ENABLE_FLASH_ATTENTION=ON`
+
+  Enable Flash Attention 2 for memory-efficient attention (requires CUDA).
 
 > Both options are optional and can be disabled for CPU-only builds.
 
@@ -74,6 +82,7 @@ Build Options:
 |                           | Autocast                        | Automatic mixed precision runtime                    | ✔ Supported    |
 | Performance Optimizations | Compute–Comm Overlap            | Explicit scheduling to hide communication latency    | ✔ Supported    |
 |                           | DDP Gradient Bucketing          | Deferred and bucketed gradient synchronization       | ✔ Supported    |
+|                           | Flash Attention 2               | Memory-efficient exact attention (2-6x speedup)      | ✔ Supported    |
 |                           | ZeRO-DP                         | DistributedOptimizer-based ZeRO-1                    | 🚧 In Progress |
 | Execution Mode            | Training Mode                   | Full forward–backward training with autograd         | ✔ Supported    |
 |                           | `no_grad` Inference             | Forward-only execution without gradient tracking     | ✔ Supported    |
@@ -105,6 +114,24 @@ The following examples demonstrate **LLaMA 3 supervised fine-tuning (SFT)** usin
   --num_iteration 10
 
 ```
+
+#### Flash Attention 2 Example
+
+Enable Flash Attention 2 for memory-efficient attention:
+
+```bash
+./llama3 \
+  --device cuda \
+  --input_bin [training_data_path] \
+  --llmc_filepath [model_path] \
+  --num_iteration 10 \
+  --flash=true \
+  --dtype=bfloat16
+```
+
+> **Note**: Flash Attention 2 requires CUDA and works best with BF16/FP16 precision on Ampere (A100) or newer GPUs.
+>
+> **Current Status**: The optimized version has a known NaN issue under investigation. Use the naive version for production workloads. See [Known Issues](#-known-issues) for details.
 
 #### Multi-nodes Training Example (3D parallel)
 
@@ -172,3 +199,58 @@ Multiple parallelism strategies (DDP, TP, SP, PP) can be freely combined to scal
    (DDP, TP, SP, PP with GPipe / 1F1B / vPP),
    multi-node training, `no_grad` mode,
    and communication–computation overlap with bucketed gradient synchronization.
+## ⚠️ Known Issues
+
+### Flash Attention 2
+
+#### Optimized Version NaN Bug (High Priority)
+
+**Status**: 🐛 Under Investigation
+
+**Description**: The optimized Flash Attention kernel produces NaN values during forward propagation due to missing numerical stability checks.
+
+**Impact**: Training fails with NaN loss when using the optimized version.
+
+**Workaround**: Use the naive version by setting `USE_OPTIMIZED_FLASH_ATTENTION=0` during compilation:
+
+```bash
+cmake .. -DUSE_CUDA=ON -DENABLE_FLASH_ATTENTION=ON \
+  -DCMAKE_CXX_FLAGS="-DUSE_OPTIMIZED_FLASH_ATTENTION=0"
+```
+
+**Root Cause**: Missing NaN protection mechanisms compared to official implementation:
+- No `-INFINITY` check in exp calculations
+- No NaN detection in sum operations
+- `blockReduceSum` template parameter mismatch
+
+**Fix Plan**: Add numerical stability checks following the official Flash Attention implementation. See [NAN_HANDLING_ANALYSIS.md](NAN_HANDLING_ANALYSIS.md) for detailed analysis.
+
+#### Other Limitations
+
+- **FP32 Not Supported**: Flash Attention 2 only supports BF16 and FP16. Using FP32 will cause runtime errors.
+- **attn_mask Not Implemented**: The `attn_mask` parameter in `ScaledDotProductAttention` is accepted but not used.
+- **GQA Not Implemented**: Grouped Query Attention (GQA) support is not yet implemented.
+- **window_size Not Implemented**: Sliding window attention is not yet implemented.
+
+## 📚 Documentation
+
+### Core Documentation
+
+- **[README.md](README.md)** - This file, project overview and quick start guide
+- **[FLASH_ATTENTION_REPORT.md](FLASH_ATTENTION_REPORT.md)** - Complete experimental report with performance benchmarks
+- **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)** - Implementation summary and optimized version analysis
+- **[CODE_REVIEW.md](CODE_REVIEW.md)** - Code review report, framework compliance check
+- **[NAN_HANDLING_ANALYSIS.md](NAN_HANDLING_ANALYSIS.md)** - NaN issue analysis and fix proposals
+
+### Framework Documentation
+
+- **[docs/hook_mechanism.md](docs/hook_mechanism.md)** - Hook mechanism guide
+- **[docs/precision_checker_guide.md](docs/precision_checker_guide.md)** - Precision checker guide
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit issues and pull requests.
+
+## 📄 License
+
+This project is licensed under the Apache License 2.0 - see the LICENSE file for details.

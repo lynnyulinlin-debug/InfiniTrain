@@ -345,12 +345,6 @@ __global__ void FlashAttentionFwdKernelOptimized(
         const int k_end = min(k_start + kBlockSize, k_end_causal);
         const int k_size = k_end - k_start;
 
-          // Debug: print k_size
-          if (threadIdx.x == 0 && batch_idx == 0 && head_idx == 0 && q_idx == 0 && k_block == 0) {
-              printf("[FWD DEBUG] k_size=%d, kBlockSize=%d\n", k_size, kBlockSize);
-          }
-
-
         // Load K block (all threads participate)
         for (int k = threadIdx.x; k < k_size; k += blockDim.x) {
             const T* k_ptr = K + batch_idx * k_batch_stride +
@@ -427,7 +421,7 @@ __global__ void FlashAttentionFwdKernelOptimized(
         // Compute exp(S - m_new) and sum
         float exp_s = (threadIdx.x < k_size) ? expf(s_S[threadIdx.x] - m_new) : 0.0f;
           // 🔍 调试：打印 exp_s
-        if (batch_idx == 0 && head_idx == 0 && q_idx == 0 && k_block == 0 && threadIdx.x < 40) {
+        if (batch_idx == 0 && head_idx == 0 && q_idx == 0 && k_block == 0 && threadIdx.x < 4) {
             printf("[FWD DEBUG] threadIdx=%d, exp_s=%f\n", threadIdx.x, exp_s);
         }
 
