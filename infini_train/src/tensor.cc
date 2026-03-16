@@ -501,8 +501,9 @@ std::shared_ptr<Tensor> Tensor::grad() const { return grad_; };
 void Tensor::set_grad(const std::shared_ptr<Tensor> &grad) {
     if (grad) {
         CHECK(grad->GetDevice() == GetDevice());
-        CHECK(grad->Dtype() == Dtype());
         CHECK(grad->Dims() == Dims());
+        // Allow BF16 gradient for FP32 parameter (will be handled by Adam kernel)
+        // CHECK(grad->Dtype() == Dtype());
         grad_ = grad;
     } else {
         grad_.reset();

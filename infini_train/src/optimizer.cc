@@ -36,15 +36,11 @@ Adam::Adam(const std::vector<std::shared_ptr<Tensor>> &params, float learning_ra
     : Optimizer(params), t_(0), learning_rate_(learning_rate), beta1_(beta1), beta2_(beta2), eps_(eps) {
 
     for (const auto &param : params_) {
-        m_.emplace_back(std::make_shared<Tensor>(param->Dims(), param->Dtype(), param->GetDevice()));
-        v_.emplace_back(std::make_shared<Tensor>(param->Dims(), param->Dtype(), param->GetDevice()));
-        DispatchFunc<INFINI_ALL_TYPES>(
-            param->Dtype(),
-            [this]<typename T>() {
-                m_.back()->Fill<T>(0);
-                v_.back()->Fill<T>(0);
-            },
-            "CUDA Adam");
+        // m 和 v 始终使用 FP32 存储（精度保证）
+        m_.emplace_back(std::make_shared<Tensor>(param->Dims(), DataType::kFLOAT32, param->GetDevice()));
+        v_.emplace_back(std::make_shared<Tensor>(param->Dims(), DataType::kFLOAT32, param->GetDevice()));
+        m_.back()->Fill<float>(0);
+        v_.back()->Fill<float>(0);
     }
 }
 
